@@ -13,18 +13,21 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSlider, QCheckBox, QFileDialog,
     QListWidget, QListWidgetItem, QMessageBox, QFrame,
-    QGroupBox, QStatusBar
+    QGroupBox, QStatusBar, QToolButton, QScrollArea
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, Signal, QPoint, QTimer
+from PySide6.QtGui import QImage, QPixmap, QIcon, QPainter
 
 # 核心模块
-from core import ImageProcessor, AppConfig
+from core import ImageProcessor, AppConfig, i18n, tr
+
+# 交互式视图组件
+from ui.interactive_view import InteractiveImageView, BoxEditToolbar
 
 
 class ImageItem:
     """图像项"""
-    
+
     def __init__(self, file_path: str, processor: ImageProcessor):
         self.file_path = file_path
         self.base_name = Path(file_path).stem
@@ -32,6 +35,30 @@ class ImageItem:
         self.source_image = None
         self.result = None
         self.dilate = AppConfig.ImageProcessing.DEFAULT_DILATE
+        self.area = AppConfig.ImageProcessing.DEFAULT_AREA
+        self.remove_horizontal = False
+        self.remove_vertical = False
+
+    def load_source(self) -> bool:
+        self.source_image = self.processor.load_image(self.file_path)
+        return self.source_image is not None
+
+    def update_params(self, dilate: int, area: int, remove_h: bool, remove_v: bool):
+        """更新处理参数"""
+        self.dilate = dilate
+        self.area = area
+        self.remove_horizontal = remove_h
+        self.remove_vertical = remove_v
+
+    def process(self) -> bool:
+        if self.source_image is None:
+            return False
+        self.processor.update_config(
+            dilate=self.dilate, area=self.area,
+            remove_h=self.remove_horizontal, remove_v=self.remove_vertical
+        )
+        self.result = self.processor.process_image(self.source_image)
+        return self.result is not None
         self.area = AppConfig.ImageProcessing.DEFAULT_AREA  
         self.remove_horizontal = False
         self.remove_vertical = False
@@ -74,9 +101,9 @@ class ParameterSlider(QWidget):
         layout.setSpacing(5)
         
         # 标签
-        lbl = QLabel(label)
-        lbl.setFixedWidth(60)
-        layout.addWidget(lbl)
+        self.lbl = QLabel(label)
+        self.lbl.setFixedWidth(60)
+        layout.addWidget(self.lbl)
         
         # 减按钮
         self.btn_minus = QPushButton("-")
@@ -175,12 +202,20 @@ class MainWindow(QMainWindow):
         self.processor = ImageProcessor()
         self.image_items: Dict[str, ImageItem] = {}
         self.current_item: Optional[ImageItem] = None
-        
+
+        # 预览模式：0=手动修正结果, 1=自动识别区域
+        self.preview_mode = 0
+        self.processing_mask = None  # 保存二值化掩膜
+
         # 启用拖放
         self.setAcceptDrops(True)
-        
+
+        # 注册语言变更监听
+        i18n.add_listener(self.on_language_changed)
+
         self.setup_ui()
         self.load_styles()
+        self.update_ui_text()
         
     def setup_ui(self):
         central_widget = QWidget()
@@ -207,28 +242,73 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        # 图像预览 - 只显示带绿色边框的处理结果
-        image_panel = QGroupBox("图像预览（带标注）")
-        image_layout = QHBoxLayout(image_panel)
-        
-        self.label_result = QLabel("拖入图片开始")
-        self.label_result.setAlignment(Qt.AlignCenter)
-        self.label_result.setMinimumSize(600, 400)
-        self.label_result.setStyleSheet("""
-            QLabel { 
-                background-color: #2D2D2D; 
-                border: 3px solid #555555; 
-                border-radius: 8px; 
-                color: #888888; 
+        # 图像预览 - 支持手动修正结果和自动识别区域切换
+        self.image_panel = QGroupBox()
+        image_layout = QVBoxLayout(self.image_panel)
+        image_layout.setSpacing(8)
+
+        # 预览模式切换按钮
+        preview_mode_layout = QHBoxLayout()
+        preview_mode_layout.setSpacing(5)
+
+        self.btn_mode_result = QToolButton()
+        self.btn_mode_result.setCheckable(True)
+        self.btn_mode_result.setChecked(True)
+        self.btn_mode_result.clicked.connect(lambda: self.set_preview_mode(0))
+        self.btn_mode_result.setStyleSheet("""
+            QToolButton {
+                color: #E0E0E0; background: #2D2D2D; border: 1px solid #555555;
+                padding: 6px 12px; border-radius: 4px; font-size: 11px;
+            }
+            QToolButton:hover { background: #404040; }
+            QToolButton:checked {
+                background: #2196F3; color: white; border-color: #2196F3;
             }
         """)
+
+        self.btn_mode_mask = QToolButton()
+        self.btn_mode_mask.setCheckable(True)
+        self.btn_mode_mask.clicked.connect(lambda: self.set_preview_mode(1))
+        self.btn_mode_mask.setStyleSheet("""
+            QToolButton {
+                color: #E0E0E0; background: #2D2D2D; border: 1px solid #555555;
+                padding: 6px 12px; border-radius: 4px; font-size: 11px;
+            }
+            QToolButton:hover { background: #404040; }
+            QToolButton:checked {
+                background: #FFFFFF; color: #000000; border-color: #FFFFFF;
+            }
+        """)
+
+        preview_mode_layout.addWidget(self.btn_mode_result)
+        preview_mode_layout.addWidget(self.btn_mode_mask)
+        preview_mode_layout.addStretch()
+
+        image_layout.addLayout(preview_mode_layout)
+
+        # 框编辑工具栏
+        self.box_toolbar = BoxEditToolbar()
+        self.box_toolbar.add_clicked.connect(self.on_add_box)
+        self.box_toolbar.delete_clicked.connect(self.on_delete_box)
+        image_layout.addWidget(self.box_toolbar)
+
+        # 预览图像 - 使用交互式视图
+        self.label_result = InteractiveImageView()
+        self.label_result.setMinimumSize(600, 400)
+        self.label_result.boxes_changed.connect(self.on_boxes_changed)
+        self.label_result.box_selected.connect(self.on_box_selected)
         image_layout.addWidget(self.label_result)
-        
-        layout.addWidget(image_panel)
+
+        # 预览说明标签
+        self.preview_info_label = QLabel()
+        self.preview_info_label.setStyleSheet("color: #888888; font-size: 11px; padding: 2px;")
+        image_layout.addWidget(self.preview_info_label)
+
+        layout.addWidget(self.image_panel)
         
         # 文件列表
-        list_panel = QGroupBox("文件列表")
-        list_layout = QVBoxLayout(list_panel)
+        self.list_panel = QGroupBox()
+        list_layout = QVBoxLayout(self.list_panel)
         
         self.file_list = QListWidget()
         self.file_list.setFixedHeight(120)
@@ -247,7 +327,7 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.btn_clear)
         list_layout.addLayout(button_layout)
         
-        layout.addWidget(list_panel)
+        layout.addWidget(self.list_panel)
         
         return panel
         
@@ -257,13 +337,26 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setSpacing(15)
         
+        # 语言切换按钮
+        self.btn_language = QPushButton()
+        self.btn_language.clicked.connect(self.on_toggle_language)
+        self.btn_language.setStyleSheet("""
+            QPushButton {
+                background-color: #607D8B; color: white;
+                border: none; padding: 8px; border-radius: 4px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #455A64; }
+        """)
+        layout.addWidget(self.btn_language)
+        
         # 融合度
-        dilate_label = QLabel("[ ] 融合度:")
-        dilate_label.setStyleSheet("font-weight: bold; color: #2196F3;")
-        layout.addWidget(dilate_label)
+        self.dilate_label = QLabel()
+        self.dilate_label.setStyleSheet("font-weight: bold; color: #2196F3;")
+        layout.addWidget(self.dilate_label)
         
         self.slider_dilate = ParameterSlider(
-            "融合度", 
+            "", 
             AppConfig.ImageProcessing.DILATE_MIN,
             AppConfig.ImageProcessing.DILATE_MAX,
             AppConfig.ImageProcessing.DEFAULT_DILATE
@@ -273,12 +366,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.slider_dilate)
         
         # 过滤阈值
-        area_label = QLabel("[X] 过滤阈值:")
-        area_label.setStyleSheet("font-weight: bold; color: #FF9800;")
-        layout.addWidget(area_label)
+        self.area_label_title = QLabel()
+        self.area_label_title.setStyleSheet("font-weight: bold; color: #FF9800;")
+        layout.addWidget(self.area_label_title)
         
         self.slider_area = ParameterSlider(
-            "过滤",
+            "",
             AppConfig.ImageProcessing.AREA_MIN,
             AppConfig.ImageProcessing.AREA_MAX,
             AppConfig.ImageProcessing.DEFAULT_AREA
@@ -287,20 +380,20 @@ class MainWindow(QMainWindow):
         self.slider_area.value_changed.connect(self.on_params_changed)
         layout.addWidget(self.slider_area)
         
-        # 选项
-        self.chk_horizontal = QCheckBox("移除水平线")
+        # 干扰线过滤选项
+        self.chk_horizontal = QCheckBox()
         self.chk_horizontal.stateChanged.connect(self.on_params_changed)
         layout.addWidget(self.chk_horizontal)
         
-        self.chk_vertical = QCheckBox("移除垂直线")
+        self.chk_vertical = QCheckBox()
         self.chk_vertical.stateChanged.connect(self.on_params_changed)
         layout.addWidget(self.chk_vertical)
         
         # 检测统计
-        info_group = QGroupBox("[统计] 检测统计")
-        info_layout = QVBoxLayout(info_group)
+        self.info_group = QGroupBox()
+        info_layout = QVBoxLayout(self.info_group)
         
-        self.label_info = QLabel("无图像")
+        self.label_info = QLabel()
         self.label_info.setWordWrap(True)
         self.label_info.setStyleSheet("""
             QLabel { background-color: #2D2D2D; padding: 8px; border-radius: 4px; font-size: 9px; }
@@ -324,16 +417,16 @@ class MainWindow(QMainWindow):
         """)
         count_layout.addWidget(self.label_count)
         
-        count_label = QLabel("识别区域")
-        count_label.setAlignment(Qt.AlignCenter)
-        count_label.setStyleSheet("color: #888888; font-size: 12px;")
-        count_layout.addWidget(count_label)
+        self.count_label = QLabel()
+        self.count_label.setAlignment(Qt.AlignCenter)
+        self.count_label.setStyleSheet("color: #888888; font-size: 12px;")
+        count_layout.addWidget(self.count_label)
         
         info_layout.addWidget(count_widget)
-        layout.addWidget(info_group)
+        layout.addWidget(self.info_group)
         
         # 导出按钮
-        self.btn_export = QPushButton("导出结果")
+        self.btn_export = QPushButton()
         self.btn_export.clicked.connect(self.export_results)
         self.btn_export.setEnabled(False)
         self.btn_export.setStyleSheet("""
@@ -344,7 +437,7 @@ class MainWindow(QMainWindow):
             QPushButton:disabled { background-color: #CCCCCC; color: #666666; }
         """)
         layout.addWidget(self.btn_export)
-        
+
         layout.addStretch()
         
         return panel
@@ -366,8 +459,8 @@ class MainWindow(QMainWindow):
         
     def load_files(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择图像文件", "",
-            f"图像文件 (*{' *'.join(AppConfig.SUPPORTED_FORMATS)})"
+            self, tr('add_files'), "",
+            f"Images (*{' *'.join(AppConfig.SUPPORTED_FORMATS)})"
         )
         
         if files:
@@ -385,7 +478,7 @@ class MainWindow(QMainWindow):
                     list_item.setData(Qt.UserRole, file_path)
                     self.file_list.addItem(list_item)
                 else:
-                    QMessageBox.warning(self, "错误", f"无法加载图像：{Path(file_path).name}")
+                    QMessageBox.warning(self, tr('error'), tr('cannot_load_image', Path(file_path).name))
         
         self.btn_export.setEnabled(bool(self.image_items))
         
@@ -414,47 +507,80 @@ class MainWindow(QMainWindow):
     def load_current_image(self):
         if not self.current_item:
             return
-            
+
         self.block_param_signals(True)
         self.slider_dilate.setValue(self.current_item.dilate)
         self.slider_area.setValue(self.current_item.area)
         self.chk_horizontal.setChecked(self.current_item.remove_horizontal)
         self.chk_vertical.setChecked(self.current_item.remove_vertical)
         self.block_param_signals(False)
-        
+
         if self.current_item.source_image is not None:
             h, w = self.current_item.source_image.shape[:2]
             self.label_info.setText(
-                f"文件：{self.current_item.base_name}\n"
-                f"尺寸：{w} x {h}\n"
-                f"路径：{Path(self.current_item.file_path).parent.name}"
+                f"{tr('file')}：{self.current_item.base_name}\n"
+                f"{tr('size')}：{w} x {h}\n"
+                f"{tr('path')}：{Path(self.current_item.file_path).parent.name}"
             )
         else:
-            self.label_info.setText("图像加载失败")
+            self.label_info.setText(tr('cannot_load_image', ''))
             return
-            
+
         self.process_current_image()
         
     def process_current_image(self):
         if not self.current_item:
             return
-            
-        self.status_bar.showMessage("处理中...")
-        
+
+        self.status_bar.showMessage(tr('processing'))
+
         if self.current_item.process():
+            # 保存二值化掩膜用于预览
+            result = self.current_item.result
+            if result:
+                self.processing_mask = result.mask
+
             self.display_results()
             regions = len(self.current_item.result.boxes)
             self.update_region_count(regions)
-            self.status_bar.showMessage(f"处理完成，检测到 {regions} 个区域")
+            self.status_bar.showMessage(tr('processing_complete', regions))
         else:
-            self.status_bar.showMessage("处理失败")
-            
+            self.status_bar.showMessage(tr('processing_failed'))
+
+    def set_preview_mode(self, mode):
+        """设置预览模式"""
+        self.preview_mode = mode
+        self.btn_mode_result.setChecked(mode == 0)
+        self.btn_mode_mask.setChecked(mode == 1)
+
+        # 更新说明标签
+        if mode == 0:
+            self.preview_info_label.setText(tr('show_manual_result'))
+            self.preview_info_label.setStyleSheet("color: #888888; font-size: 11px; padding: 2px;")
+        elif mode == 1:
+            self.preview_info_label.setText(tr('show_auto_region'))
+            self.preview_info_label.setStyleSheet("color: #FFFFFF; font-size: 11px; padding: 2px;")
+
+        # 重新显示
+        self.display_results()
+
     def display_results(self):
         if not self.current_item or not self.current_item.result:
             return
-            
-        # 只显示带绿色边框的标注结果
-        self.show_cv2_img(self.current_item.result.preview, self.label_result)
+
+        # 根据预览模式显示不同图像
+        if self.preview_mode == 0:
+            # 最终结果（带标注）- 使用交互式视图
+            self.label_result.set_cv_image(self.current_item.result.preview)
+            self.label_result.set_boxes(self.current_item.result.boxes)
+        elif self.preview_mode == 1 and self.processing_mask is not None:
+            # 二值化掩膜（带绿框标注）
+            mask_with_boxes = self.processor.create_mask_preview(
+                self.processing_mask, 
+                self.current_item.result.boxes
+            )
+            self.label_result.set_cv_image(mask_with_boxes)
+            self.label_result.set_boxes(self.current_item.result.boxes)
         
     def show_cv2_img(self, cv2_img, label):
         try:
@@ -524,10 +650,10 @@ class MainWindow(QMainWindow):
         self.chk_vertical.blockSignals(block)
         
     def reset_display(self):
-        # 只重置保留的 label_result
-        self.label_result.setPixmap(QPixmap())
-        self.label_result.setText("拖入图片开始")
-        self.label_info.setText("无图像")
+        # 重置显示
+        self.label_result.set_cv_image(None)
+        self.label_result.set_boxes([])
+        self.label_info.setText(tr('no_image'))
         self.label_count.setText("0")
         self.label_count.setStyleSheet("""
             QLabel {
@@ -536,23 +662,30 @@ class MainWindow(QMainWindow):
                 padding: 10px; border-radius: 8px; margin: 5px 0;
             }
         """)
+
+        # 重置预览模式
+        self.processing_mask = None
+        self.box_toolbar.set_delete_enabled(False)
         
     def export_results(self):
         if not self.image_items:
             return
             
-        export_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
+        export_dir = QFileDialog.getExistingDirectory(self, tr('export_results'))
         if not export_dir:
             return
             
         export_count = 0
         
         for item in self.image_items.values():
-            if item.result and item.result.boxes:
+            # 使用当前编辑后的框（如果有）
+            boxes = self.label_result.get_boxes() if item == self.current_item else item.result.boxes
+            
+            if item.result and boxes:
                 output_dir = Path(export_dir) / item.base_name
                 output_dir.mkdir(parents=True, exist_ok=True)
                 
-                crops = self.processor.crop_boxes(item.source_image, item.result.boxes)
+                crops = self.processor.crop_boxes(item.source_image, boxes)
                 
                 for i, crop in enumerate(crops, 1):
                     filename = f"{item.base_name}_{i}.png"
@@ -563,11 +696,107 @@ class MainWindow(QMainWindow):
                         
         QMessageBox.information(
             self, 
-            "导出完成", 
-            f"成功导出 {export_count} 个图像到:\n{export_dir}"
+            tr('export_finished'), 
+            tr('export_success', export_count, export_dir)
         )
         
-        self.status_bar.showMessage(f"导出完成：{export_count} 个文件")
+        self.status_bar.showMessage(tr('export_complete', export_count))
+    
+    def on_add_box(self):
+        """开始添加框模式"""
+        if not self.current_item or not self.current_item.result:
+            QMessageBox.warning(self, tr('warning'), tr('add_box_first'))
+            return
+        self.label_result.start_add_mode()
+        self.status_bar.showMessage("Add mode: Drag on image to draw new box" if i18n.current_lang == 'en' else "添加模式：在图像上拖拽绘制新框")
+    
+    def on_delete_box(self):
+        """删除选中的框"""
+        self.label_result.delete_selected_box()
+        self.box_toolbar.set_delete_enabled(False)
+        self.status_bar.showMessage("Box deleted" if i18n.current_lang == 'en' else "已删除选中框")
+    
+    def on_boxes_changed(self, boxes: List[tuple]):
+        """框发生变化时更新数据"""
+        if self.current_item and self.current_item.result:
+            # 更新结果中的框
+            self.current_item.result.boxes = boxes
+            # 更新区域计数
+            self.update_region_count(len(boxes))
+            self.status_bar.showMessage(tr('box_updated', len(boxes)))
+    
+    def on_box_selected(self, index: int):
+        """框被选中时更新工具栏"""
+        self.box_toolbar.set_delete_enabled(True)
+        self.status_bar.showMessage(tr('box_selected', index))
+
+    def on_toggle_language(self):
+        """切换语言"""
+        i18n.toggle_language()
+
+    def on_language_changed(self, lang: str):
+        """语言变更回调"""
+        self.update_ui_text()
+        # 刷新当前显示
+        if self.current_item:
+            self.load_current_image()
+
+    def update_ui_text(self):
+        """更新所有UI文本"""
+        # 窗口标题
+        self.setWindowTitle(tr('app_title'))
+
+        # 图像预览面板
+        self.image_panel.setTitle(tr('image_preview'))
+        self.btn_mode_result.setText(tr('manual_result'))
+        self.btn_mode_mask.setText(tr('auto_detect_region'))
+
+        # 预览说明标签
+        if self.preview_mode == 0:
+            self.preview_info_label.setText(tr('show_manual_result'))
+        else:
+            self.preview_info_label.setText(tr('show_auto_region'))
+
+        # 框编辑工具栏
+        self.box_toolbar.btn_add.setText(tr('add_box'))
+        self.box_toolbar.btn_add.setToolTip(tr('add_box_tooltip'))
+        self.box_toolbar.btn_delete.setText(tr('delete_selected'))
+        self.box_toolbar.btn_delete.setToolTip(tr('delete_tooltip'))
+        self.box_toolbar.label_hint.setText(tr('edit_hint'))
+
+        # 文件列表面板
+        self.list_panel.setTitle(tr('file_list'))
+        self.btn_load.setText(tr('add_files'))
+        self.btn_clear.setText(tr('clear_list'))
+
+        # 参数标签
+        self.dilate_label.setText(tr('dilate'))
+        self.slider_dilate.lbl.setText(tr('dilate_label'))
+        self.area_label_title.setText(tr('area'))
+        self.slider_area.lbl.setText(tr('area_label'))
+
+        # 干扰线过滤
+        self.chk_horizontal.setText(tr('filter_horizontal'))
+        self.chk_horizontal.setToolTip(tr('filter_horizontal_tooltip'))
+        self.chk_vertical.setText(tr('filter_vertical'))
+        self.chk_vertical.setToolTip(tr('filter_vertical_tooltip'))
+
+        # 统计面板
+        self.info_group.setTitle(tr('detection_stats'))
+        if not self.current_item:
+            self.label_info.setText(tr('no_image'))
+        self.count_label.setText(tr('detected_regions'))
+
+        # 导出按钮
+        self.btn_export.setText(tr('export_results'))
+
+        # 语言按钮
+        current_lang_name = i18n.LANGUAGES.get(i18n.current_lang, '中文')
+        self.btn_language.setText(f"🌐 {current_lang_name}")
+
+        # 状态栏
+        if not self.current_item:
+            self.status_bar.showMessage(tr('ready'))
         
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -620,7 +849,7 @@ class MainWindow(QMainWindow):
             
             if image_files:
                 self.add_files(image_files)
-                self.status_bar.showMessage(f"添加了 {len(image_files)} 个文件")
+                self.status_bar.showMessage(f"Added {len(image_files)} files" if i18n.current_lang == 'en' else f"添加了 {len(image_files)} 个文件")
                 
             event.acceptProposedAction()
             

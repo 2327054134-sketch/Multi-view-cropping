@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ViewCrop - 智能图像分割工具
-版本: 2.0 (全新重构)
-功能: 自动识别和分割图像中的独立区域
+Multi-view cropping - 智能多视图批量裁切工具
+版本: 1.0
+功能: 通过调节融合度与过滤阈值，实现批量多视图智能裁切
 """
 
 import sys
@@ -41,8 +41,8 @@ def setup_application():
     app = QApplication(sys.argv)
     
     # 设置应用程序信息
-    app.setApplicationName("ViewCrop")
-    app.setApplicationVersion("2.0")
+    app.setApplicationName("Multi-view cropping")
+    app.setApplicationVersion("1.0")
     app.setOrganizationName("CoPaw")
     
     # 设置默认字体
@@ -63,7 +63,7 @@ def import_modules():
 def main():
     """主函数"""
     print("=" * 50)
-    print("ViewCrop 2.0 - 智能图像分割工具")
+    print("Multi-view cropping 1.0 - 智能多视图批量裁切工具")
     print("=" * 50)
     
     # 检查Python版本
@@ -84,7 +84,7 @@ def main():
         window = MainWindow()
         window.show()
         
-        print("ViewCrop启动成功！")
+        print("Multi-view cropping启动成功！")
         print("=" * 50)
         
         # 运行应用

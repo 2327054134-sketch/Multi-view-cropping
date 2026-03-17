@@ -1,4 +1,4 @@
-# ViewCrop 2.0 使用指南
+# Multi-view cropping 1.0 使用指南
 
 ## 🚀 快速启动
 

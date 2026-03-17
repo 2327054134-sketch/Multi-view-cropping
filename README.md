@@ -1,6 +1,6 @@
-# ViewCrop 2.0 - 智能多视图批量裁切工具
+# Multi-view cropping 1.0 - 智能多视图批量裁切工具
 
-> 经典重构版本，简洁、稳定、高效
+> 简洁、稳定、高效的多视图批量处理工具
 
 ## 🌟 简介
 
@@ -31,4 +31,4 @@ python main.py
 
 ---
 
-详细文档请查看 [USAGE.md](USAGE.md) 和 [ViewCrop 2.0 使用说明书.md](ViewCrop%202.0%20使用说明书.md)
+详细文档请查看 [USAGE.md](USAGE.md) 和 [使用说明书.md](ViewCrop%202.0%20使用说明书.md)

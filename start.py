@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ViewCrop 快速启动脚本
+Multi-view cropping 快速启动脚本
 自动检查环境并启动程序
 """
 
@@ -54,7 +54,7 @@ def install_dependencies():
 def start_application():
     """启动应用程序"""
     try:
-        print("\n🚀 启动ViewCrop...")
+        print("\n🚀 启动Multi-view cropping...")
         print("-" * 40)
         
         # 导入主程序
@@ -64,9 +64,9 @@ def start_application():
         exit_code = main_func()
         
         if exit_code == 0:
-            print("\n[OK] ViewCrop正常退出")
+            print("\n[OK] Multi-view cropping正常退出")
         else:
-            print(f"\n[ERROR] ViewCrop异常退出 (代码: {exit_code})")
+            print(f"\n[ERROR] Multi-view cropping异常退出 (代码: {exit_code})")
             
         return exit_code
         
@@ -81,7 +81,7 @@ def start_application():
 
 def main():
     """主函数"""
-    print("ViewCrop 2.0 启动器")
+    print("Multi-view cropping 1.0 启动器")
     print("=" * 40)
     
     # 检查Python版本
